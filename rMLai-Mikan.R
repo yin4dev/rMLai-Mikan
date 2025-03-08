@@ -581,7 +581,7 @@ server <- function(input, output, session) {
   output$name_var_ui <- renderUI({
     req(data_reactive())
     df <- data_reactive()
-    selectInput("name_var", "Name Variable (Selection)", choices = names(df))
+    selectInput("name_var", "Name Variable", choices = names(df))
   })
   
   # Determine Task Type
