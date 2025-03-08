@@ -1,6 +1,7 @@
 
 # rMLai-Mikan
 A Shiny application for interactive **machine learning** model building, prediction, report generation and **AI assistant**.
+
 (This app is part of the **WakaCitrus-Informatics** series. For other apps in the **WakaCitrus-Informatics** series, please visit:　https://github.com/yin4dev?tab=repositories)
 
 Welcome to **rMLai-Mikan**! This open-source project is designed to provide a user-friendly interface for data analysis, model training, prediction (including inverse prediction via genetic algorithms), similarity search, and an integrated AI assistant for chat-based interaction. Contributions, improvements, and customizations are welcome—feel free to fork and submit pull requests.
