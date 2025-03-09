@@ -1,5 +1,5 @@
-app_name = "rMLai-Mikan v0.1"
-# 20250308
+app_name = "rMLai-Mikan v0.1.1"
+# 20250309
 # Hongrong Yin
 
 library(shiny)
@@ -122,6 +122,90 @@ custom_box_plot <- function(df, variable, target) {
     geom_boxplot(fill = "steelblue") +
     theme_minimal() +
     labs(x = variable, y = target, title = paste(target, "vs", variable))
+}
+
+###############################################################################
+# get_var_importance_str Function
+###############################################################################
+get_var_importance_str <- function(model, iname, train_data, target_var, features) {
+  if(grepl("rpart", iname)) {
+    imp <- model$variable.importance
+    if(is.null(imp)) return("No varImp")
+    return(paste(paste(names(imp), round(imp,3), sep="="), collapse=", "))
+  } else if(grepl("rf", iname)) {
+    imp <- model$importance
+    if(is.null(imp)) return("No varImp")
+    if(is.matrix(imp)) {
+      if("MeanDecreaseGini" %in% colnames(imp)) {
+        imp_vals <- imp[, "MeanDecreaseGini"]
+        return(paste(paste(rownames(imp), round(imp_vals,3), sep="="), collapse=", "))
+      } else {
+        imp_vals <- rowMeans(imp)
+        return(paste(paste(rownames(imp), round(imp_vals,3), sep="="), collapse=", "))
+      }
+    } else {
+      return(paste(paste(names(imp), round(imp,3), sep="="), collapse=", "))
+    }
+  } else if(grepl("xgboost", iname)) {
+    bst <- model
+    imp_df <- tryCatch(xgb.importance(feature_names=features, model=bst), error=function(e)NULL)
+    if(is.null(imp_df)) return("No varImp")
+    topv <- imp_df[, c("Feature", "Gain")]
+    return(paste(apply(topv, 1, function(r) paste0(r[1],"=", round(as.numeric(r[2]),3))), collapse=", "))
+  } else if(grepl("lasso_cv", iname)) {
+    coefs <- coef(model, s="lambda.min")
+    coefs_mat <- as.matrix(coefs)
+    nm <- rownames(coefs_mat)
+    vals <- round(coefs_mat[,1],3)
+    return(paste(paste0(nm,"=", vals), collapse=", "))
+  } else if(grepl("regr.lm", iname)) {
+    coefs <- stats::coef(model)
+    nm <- names(coefs)
+    return(paste(paste(nm, round(coefs,3), sep="="), collapse=", "))
+  } else if(grepl("svm", iname)) {
+    return("Not Supported (svm)")
+  } else if(grepl("naive_bayes", iname)) {
+    return("Not Supported (naiveBayes)")
+  } else if(grepl("kknn", iname)) {
+    return("Not Supported (kknn)")
+  } else if(grepl("log_reg", iname)) {
+    return("Logistic coefs or Not Supported")
+  }
+  return("Not Supported")
+}
+
+###############################################################################
+# Updated Classification Metrics Function with AUC Calculation
+###############################################################################
+get_classification_metrics <- function(y_true, y_pred, prob = NULL) {
+  if(!is.factor(y_true) || !is.factor(y_pred)) 
+    return(list(Accuracy = NA, F1 = NA, AUC = NA))
+  
+  acc <- mean(y_true == y_pred)
+  
+  # Only compute F1 and AUC for binary classification
+  if(length(levels(y_true)) == 2){
+    pos <- levels(y_true)[2]
+    tp <- sum(y_pred == pos & y_true == pos)
+    fp <- sum(y_pred == pos & y_true != pos)
+    fn <- sum(y_pred != pos & y_true == pos)
+    precision <- ifelse(tp+fp == 0, 0, tp/(tp+fp))
+    recall    <- ifelse(tp+fn == 0, 0, tp/(tp+fn))
+    f1        <- ifelse(precision+recall == 0, 0, 2*precision*recall/(precision+recall))
+    
+    auc_value <- NA
+    if (!is.null(prob)) {
+      # Use pROC package to compute AUC; 'prob' must be the predicted probability for the positive class.
+      roc_obj <- try(pROC::roc(response = y_true, predictor = prob, levels = levels(y_true)), silent = TRUE)
+      if (!inherits(roc_obj, "try-error")) {
+        auc_value <- as.numeric(pROC::auc(roc_obj))
+      }
+    }
+    
+    return(list(Accuracy = acc, F1 = f1, AUC = auc_value))
+  } else {
+    return(list(Accuracy = acc, F1 = NA, AUC = NA))
+  }
 }
 
 ###############################################################################
@@ -509,13 +593,11 @@ server <- function(input, output, session) {
     uf <- uploadedFiles()
     uf[["MachineLearning_Report.txt"]] <- rep_txt
     uploadedFiles(uf)
-    # Update history file selection choices
     updateSelectInput(session, "historyFilesSelect",
                       choices = names(uf),
                       selected = c(input$historyFilesSelect, "MachineLearning_Report.txt"))
     showNotification("The machine learning report has been incorporated into the LLM.", type = "message")
   })
-  
   
   #======================= Machine Learning Part ======================#
   
@@ -534,7 +616,6 @@ server <- function(input, output, session) {
     colnames(df) <- make.names(colnames(df), unique=TRUE)
     df
   })
-  
   
   # UI for Target and Feature Variables
   observeEvent(data_reactive(), {
@@ -653,13 +734,6 @@ server <- function(input, output, session) {
     if(is.null(df)) {
       return(data.frame(Message="No data available."))
     }
-    df
-  }, options=list(scrollX=TRUE, pageLength=10))
-  
-  output$filtered_data_table <- DT::renderDataTable({
-    df <- get_filtered_data()
-    if(is.null(df)) return(data.frame(Message="No data available."))
-    
     if(!is.null(input$name_var) && input$name_var %in% names(df)){
       df <- df[c(input$name_var, setdiff(names(df), input$name_var))]
     }
@@ -832,70 +906,6 @@ server <- function(input, output, session) {
     rmse <- sqrt(mse)
     r2 <- 1 - sum((y_true - y_pred)^2)/sum((y_true - mean(y_true))^2)
     list(MAE=mae, MSE=mse, RMSE=rmse, R2=r2)
-  }
-  
-  get_classification_metrics <- function(y_true, y_pred) {
-    if(!is.factor(y_true) || !is.factor(y_pred)) return(list(Accuracy=NA, F1=NA, AUC=NA))
-    acc <- mean(y_true==y_pred)
-    if(length(levels(y_true))==2){
-      pos <- levels(y_true)[2]
-      tp <- sum(y_pred==pos & y_true==pos)
-      fp <- sum(y_pred==pos & y_true!=pos)
-      fn <- sum(y_pred!=pos & y_true==pos)
-      precision <- ifelse(tp+fp==0, 0, tp/(tp+fp))
-      recall <- ifelse(tp+fn==0, 0, tp/(tp+fn))
-      f1 <- ifelse(precision+recall==0, 0, 2*precision*recall/(precision+recall))
-      list(Accuracy=acc, F1=f1, AUC=NA)
-    } else {
-      list(Accuracy=acc, F1=NA, AUC=NA)
-    }
-  }
-  
-  get_var_importance_str <- function(model, iname, train_data, target_var, features) {
-    if(grepl("rpart", iname)) {
-      imp <- model$variable.importance
-      if(is.null(imp)) return("No varImp")
-      return(paste(paste(names(imp), round(imp,3), sep="="), collapse=", "))
-    } else if(grepl("rf", iname)) {
-      imp <- model$importance
-      if(is.null(imp)) return("No varImp")
-      if(is.matrix(imp)) {
-        if("MeanDecreaseGini" %in% colnames(imp)) {
-          imp_vals <- imp[, "MeanDecreaseGini"]
-          return(paste(paste(rownames(imp), round(imp_vals,3), sep="="), collapse=", "))
-        } else {
-          imp_vals <- rowMeans(imp)
-          return(paste(paste(rownames(imp), round(imp_vals,3), sep="="), collapse=", "))
-        }
-      } else {
-        return(paste(paste(names(imp), round(imp,3), sep="="), collapse=", "))
-      }
-    } else if(grepl("xgboost", iname)) {
-      bst <- model
-      imp_df <- tryCatch(xgb.importance(feature_names=features, model=bst), error=function(e)NULL)
-      if(is.null(imp_df)) return("No varImp")
-      topv <- imp_df[, c("Feature", "Gain")]
-      return(paste(apply(topv, 1, function(r) paste0(r[1],"=", round(as.numeric(r[2]),3))), collapse=", "))
-    } else if(grepl("lasso_cv", iname)) {
-      coefs <- coef(model, s="lambda.min")
-      coefs_mat <- as.matrix(coefs)
-      nm <- rownames(coefs_mat)
-      vals <- round(coefs_mat[,1],3)
-      return(paste(paste0(nm,"=", vals), collapse=", "))
-    } else if(grepl("regr.lm", iname)) {
-      coefs <- stats::coef(model)
-      nm <- names(coefs)
-      return(paste(paste(nm, round(coefs,3), sep="="), collapse=", "))
-    } else if(grepl("svm", iname)) {
-      return("Not Supported (svm)")
-    } else if(grepl("naive_bayes", iname)) {
-      return("Not Supported (naiveBayes)")
-    } else if(grepl("kknn", iname)) {
-      return("Not Supported (kknn)")
-    } else if(grepl("log_reg", iname)) {
-      return("Logistic coefs or Not Supported")
-    }
-    return("Not Supported")
   }
   
   output$hyperparam_ui <- renderUI({
@@ -1155,7 +1165,12 @@ server <- function(input, output, session) {
             fit <- rpart::rpart(f, data=df, method="class",
                                 control=rpart::rpart.control(cp=cp_val))
             pred <- predict(fit, newdata=df, type="class")
-            mets <- get_classification_metrics(actual, pred)
+            # For AUC, probability estimates are needed; here we assume using the second class probability if available.
+            prob <- tryCatch({
+              p <- predict(fit, newdata=df)[,2]
+              p
+            }, error = function(e) NA)
+            mets <- get_classification_metrics(actual, pred, prob)
             varimp <- get_var_importance_str(fit, mod_iname, df, target_col, feature_cols)
             
             current_models[[mod_iname]] <- fit
@@ -1176,7 +1191,11 @@ server <- function(input, output, session) {
             f <- as.formula(paste(target_col, "~", paste(feature_cols, collapse="+")))
             fit <- randomForest::randomForest(f, data=df, ntree=ntree_val, mtry=mtry_val)
             pred <- predict(fit, newdata=df)
-            mets <- get_classification_metrics(actual, pred)
+            prob <- tryCatch({
+              p <- predict(fit, newdata=df, type="prob")[,2]
+              p
+            }, error = function(e) NA)
+            mets <- get_classification_metrics(actual, pred, prob)
             varimp <- get_var_importance_str(fit, mod_iname, df, target_col, feature_cols)
             
             current_models[[mod_iname]] <- fit
@@ -1212,7 +1231,7 @@ server <- function(input, output, session) {
             pred_class <- ifelse(prob>=0.5, lv[2], lv[1])
             pred_class <- factor(pred_class, levels=lv)
             
-            mets <- get_classification_metrics(actual, pred_class)
+            mets <- get_classification_metrics(actual, pred_class, prob)
             varimp <- get_var_importance_str(fit, mod_iname, df, target_col, colnames(X))
             
             current_models[[mod_iname]] <- list(booster=fit, x_names=colnames(X), y_levels=lv)
@@ -1261,7 +1280,7 @@ server <- function(input, output, session) {
               pred_class <- ifelse(prob>=0.5, lv[2], lv[1])
               pred_class <- factor(pred_class, levels=lv)
               
-              mets <- get_classification_metrics(actual, pred_class)
+              mets <- get_classification_metrics(actual, pred_class, prob)
               varimp <- "Coefficients: summary(glm)"
               
               current_models[[mod_iname]] <- fit
